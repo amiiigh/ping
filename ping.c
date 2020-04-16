@@ -8,14 +8,27 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/ip.h>
-#include <linux/icmp.h>
+#include <netinet/ip_icmp.h>
 #include <string.h>
 #include <unistd.h>
 
+
+#define KYEL  "\x1B[33m"
+#define KNRM  "\x1B[0m"
+#define KRED  "\x1B[31m"
+#define KGRN  "\x1B[32m"
+
 #define INTERVAL 1000000
 #define TIMEOUT 1
+#define PACKET_SIZE 64
 
 int ping_loop = 1;
+
+
+struct ping_packet {
+	struct icmphdr header; 
+	char msg[PACKET_SIZE-sizeof(struct icmphdr)]; 
+};
 
 char* get_hostname_addr(char* address)
 {
@@ -27,6 +40,56 @@ char* get_hostname_addr(char* address)
 		exit(EXIT_FAILURE);
 	}
 	return inet_ntoa(*(struct in_addr *)h->h_addr);
+}
+
+int create_socket(int ttl, int ts) 
+{
+	struct timeval timeout; 
+	timeout.tv_sec = ts; 
+	timeout.tv_usec = 0; 
+
+	int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+	setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)); 
+	setsockopt(sockfd, SOL_IP, IP_TTL, &ttl, sizeof(ttl));
+	return sockfd;
+}
+
+int is_valid_ip(char *ip_addr) 
+{
+	struct sockaddr_in sa;
+	return inet_pton(AF_INET, ip_addr, &(sa.sin_addr));
+}
+
+void show_usage() 
+{
+	printf("%s", KGRN);
+	printf("Usage: ping [-t ttl] [-c count] [-i interval] [-w timeout] destination\n");
+	printf("%s", KNRM);
+}
+
+void interrupt_handler(int sig) 
+{
+	ping_loop = 0;
+}
+
+void show_stats(int pkt_sent_cnt, int pkt_recv_cnt, float min_rtt, float max_rtt, float sum_rtt)
+{
+	float avg_rtt = sum_rtt/(float)pkt_recv_cnt;
+	if (pkt_recv_cnt == 0)
+	{
+		min_rtt = 0;
+		max_rtt = 0;
+		sum_rtt = 0;
+		avg_rtt = 0;
+	}
+	float pkt_loss = ((pkt_sent_cnt - pkt_recv_cnt)/(float)pkt_sent_cnt)*100.0;
+	printf("\n%s", KGRN);
+	printf("+-----------------------------------------+\n");
+	printf("+----------------- STATS -----------------+\n");
+	printf("+-----------------------------------------+\n");
+	printf("%s", KNRM);
+	printf("%d packets transmitted, %d received, %.2f%% packet loss\n", pkt_sent_cnt, pkt_recv_cnt, pkt_loss);
+	printf("min rtt: %.2f ms, max rtt: %.2f ms, avg rtt: %.2f ms \n", min_rtt, max_rtt, avg_rtt);
 }
 
 unsigned short checksum(unsigned short *buffer, int len) 
@@ -46,99 +109,68 @@ unsigned short checksum(unsigned short *buffer, int len)
 	sum += (sum >> 16); 
 	result = ~sum; 
 	return result; 
-} 
-
-struct icmphdr* init_icmp_hdr(char * buf, int seq_no) 
-{
-	struct icmphdr* icmp;
-	icmp = (struct icmphdr*)(buf);
-	icmp->type = ICMP_ECHO;
-	icmp->code = 0;
-	icmp->un.echo.id = getpid();
-	icmp->un.echo.sequence = seq_no;
-	icmp->checksum = checksum((unsigned short *)icmp, sizeof(struct icmphdr));
-	return icmp;
 }
 
-int create_socket(int ttl, int ts) 
+struct ping_packet* init_ping_pkt(struct ping_packet* packet, int seq_no) 
 {
-	struct timeval timeout; 
-	timeout.tv_sec = ts; 
-	timeout.tv_usec = 0; 
-
-	int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-	setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof timeout); 
-	setsockopt(sockfd, SOL_IP, IP_TTL, &ttl, sizeof(ttl));
-	return sockfd;
-}
-
-int is_valid_ip(char *ip_addr) 
-{
-	struct sockaddr_in sa;
-	return inet_pton(AF_INET, ip_addr, &(sa.sin_addr));
-}
-
-void show_usage() 
-{
-	printf("Usage: ping [-t ttl] [-c count] [-i interval] [-w timeout] destination\n");
-}
-
-void interrupt_handler(int sig) 
-{
-	ping_loop = 0;
-}
-
-void show_stats(int pkt_sent_cnt, int pkt_recv_cnt, float min_rtt, float max_rtt, float sum_rtt)
-{
-	float pkt_loss = ((pkt_sent_cnt - pkt_recv_cnt)/(float)pkt_sent_cnt)*100.0;
-	printf("\n---- ping statistics ----\n");
-	printf("%d packets transmitted, %d received, %f%% packet loss\n", pkt_sent_cnt, pkt_recv_cnt, pkt_loss);
-	printf("min rtt: %f \n", min_rtt);
-	printf("max rtt: %f \n", max_rtt);
-	printf("avg rtt: %f \n", sum_rtt/(float)pkt_recv_cnt);
+	int i;
+	bzero(packet, sizeof(struct ping_packet)); 
+	for ( i = 0; i < sizeof(packet->msg)-1; i++) 
+		packet->msg[i] = i+'0';
+	packet->msg[i] = 0; 
+	packet->header.code = 0;
+	packet->header.type = ICMP_ECHO;
+	packet->header.un.echo.id = getpid();
+	packet->header.un.echo.sequence = seq_no;
+	packet->header.checksum = checksum((unsigned short*)packet, sizeof(struct ping_packet));
+	return packet;
 }
 
 float ping(int sockfd, struct sockaddr_in* connection, char* destination, int* pkt_sent_cnt, int* pkt_recv_cnt)
 {
 	struct timeval start, end;
 	struct iphdr* ip_reply;
+	struct ping_packet* packet; 
 	struct icmphdr* icmp;
-	struct icmphdr* icmp_reply;
+	struct sockaddr_in reply_addr; 
+	struct ping_packet* reply_packet;
 	char* out_pkt;
 	char* in_pkt;
 	int addrlen;
 	float rtt;
 	int recv_bytes;
 
-	out_pkt = malloc(sizeof(struct icmphdr));
-	in_pkt = malloc(sizeof(struct iphdr) + sizeof(struct icmphdr));
-
-	icmp = init_icmp_hdr(out_pkt, (*pkt_sent_cnt));
+	packet = (struct ping_packet*)malloc(sizeof(struct ping_packet));
+	in_pkt = malloc(sizeof(struct iphdr) + sizeof(struct ping_packet));
+	init_ping_pkt(packet, (*pkt_sent_cnt));
 
 	gettimeofday(&start, NULL);
-	sendto(sockfd, out_pkt, sizeof(out_pkt), 0, (struct sockaddr *)connection, sizeof(*connection));
+	sendto(sockfd, packet, sizeof(struct ping_packet), 0, (struct sockaddr *)connection, sizeof(*connection));
+
 	(*pkt_sent_cnt)++;
 
-	addrlen = sizeof(*connection);
-	if((recv_bytes = recvfrom(sockfd, in_pkt, sizeof(struct iphdr) + sizeof(struct icmphdr), 0, (struct sockaddr *)connection, &addrlen)) == -1) {
+	addrlen = sizeof(reply_addr);
+	if((recv_bytes = recvfrom(sockfd, in_pkt, sizeof(struct iphdr) + sizeof(struct ping_packet), 0, (struct sockaddr *)&reply_addr, &addrlen)) == -1) 
+	{
 		perror("recv");
-	} else {
+	} else 
+	{
 		ip_reply = (struct iphdr*) in_pkt;
-		icmp_reply = (struct icmphdr*)(in_pkt + sizeof(struct iphdr));
-		// printf("type: %d, code: %d\n", icmp_reply->type, icmp_reply->code);
-		gettimeofday(&end, NULL);
-		(*pkt_recv_cnt)++;
-		rtt = 1000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1000.0;
-		if (icmp_reply->type == 11) 
+		reply_packet = (struct ping_packet*)(in_pkt + sizeof(struct iphdr));
+		// printf("type: %d, code: %d\n", reply_packet->header.type, reply_packet->header.code);
+		if (reply_packet->header.type == 11) 
 		{
 			printf("Time to live exceeded\n");
-		} else if (icmp_reply->type == 0) 
+		} else if (reply_packet->header.type == 0) 
 		{
-			printf("%d bytes from (%s) time: %f ms\n", recv_bytes, destination, rtt);
+			gettimeofday(&end, NULL);
+			rtt = 1000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1000.0;
+			(*pkt_recv_cnt)++;
+			printf("%d bytes from (%s%s%s) time: %s%f%s ms\n", recv_bytes, KYEL, destination, KNRM, KGRN, rtt, KNRM);
 		}
 	}
 
-	free(out_pkt);
+	free(packet);
 	free(in_pkt);
 	return rtt;
 }
@@ -162,7 +194,9 @@ void send_ping_requests(char* destination, int ttl, int count, int interval, int
 
 	int sockfd = create_socket(ttl, ts);
 
+	printf("%s", KYEL);
 	printf("PING (%s)\n", destination);
+	printf("%s", KNRM);
 	while (ping_loop) {
 		if (count > 0)
 		{
@@ -202,30 +236,30 @@ int main(int argc, char** argv) {
 		switch(opt)  
 		{  
 			case 't': 
-				ttl = atoi(optarg);
-				break;  
+			ttl = atoi(optarg);
+			break;  
 			case 'c':
-				count = atoi(optarg);
-				break;
+			count = atoi(optarg);
+			break;
 			case 'i':
-				interval = atoi(optarg) * 1000000;
-				break;
+			interval = atoi(optarg) * 1000000;
+			break;
 			case 'w':
-				ts = atoi(optarg);
-				break;  
+			ts = atoi(optarg);
+			break;  
 			case ':':  
-				printf("option needs a value\n");  
-				break;  
+			printf("option needs a value\n");  
+			break;  
 			case '?':
-				if (optopt == 'c')
- 					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
- 				else if (optopt == 't')
- 					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
- 				else if (optopt == 'i')
- 					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
- 				 else if (optopt == 'w')
- 					fprintf (stderr, "Option -%c requires an argument.\n", optopt); 				
-				break;  
+			if (optopt == 'c')
+				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+			else if (optopt == 't')
+				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+			else if (optopt == 'i')
+				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+			else if (optopt == 'w')
+				fprintf (stderr, "Option -%c requires an argument.\n", optopt); 				
+			break;  
 		}  
 	}
 
