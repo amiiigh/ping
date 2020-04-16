@@ -109,7 +109,7 @@ void show_stats(struct stats* statistics)
 
 unsigned short checksum(unsigned short *buffer, int len) 
 {    
-	unsigned long cksum = 0; 
+	unsigned long cksum = 0;
 	for (cksum = 0; len > 1; len -= 2 )
 	{
 		cksum += *buffer++;
@@ -126,9 +126,10 @@ unsigned short checksum(unsigned short *buffer, int len)
 struct ping_packet* init_ping_pkt(struct ping_packet* packet, int seq_no) 
 {
 	int i;
+	char* msg = "CLOUDFLARE IS AWESOME! ";
 	bzero(packet, sizeof(struct ping_packet)); 
-	for ( i = 0; i < sizeof(packet->msg)-1; i++) 
-		packet->msg[i] = i+'0';
+	for ( i = 0; i < sizeof(packet->msg)-1; i++)
+		packet->msg[i] = msg[i % strlen(msg)];
 	packet->msg[i] = 0; 
 	packet->header.code = 0;
 	packet->header.type = ICMP_ECHO;
