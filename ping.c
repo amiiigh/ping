@@ -236,29 +236,29 @@ int main(int argc, char** argv) {
 		switch(opt)  
 		{  
 			case 't': 
-			ttl = atoi(optarg);
-			break;  
+				ttl = atoi(optarg);
+				break;  
 			case 'c':
-			count = atoi(optarg);
-			break;
+				count = atoi(optarg);
+				break;
 			case 'i':
-			interval = atoi(optarg) * 1000000;
-			break;
+				interval = atoi(optarg) * 1000000;
+				break;
 			case 'w':
-			ts = atoi(optarg);
-			break;  
+				ts = atoi(optarg);
+				break;  
 			case ':':  
-			printf("option needs a value\n");  
-			break;  
+				printf("option needs a value\n");  
+				break;  
 			case '?':
-			if (optopt == 'c')
-				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
-			else if (optopt == 't')
-				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
-			else if (optopt == 'i')
-				fprintf (stderr, "Option -%c requires an argument.\n", optopt);
-			else if (optopt == 'w')
-				fprintf (stderr, "Option -%c requires an argument.\n", optopt); 				
+				if (optopt == 'c')
+					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+				else if (optopt == 't')
+					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+				else if (optopt == 'i')
+					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+				else if (optopt == 'w')
+					fprintf (stderr, "Option -%c requires an argument.\n", optopt); 				
 			break;  
 		}  
 	}
