@@ -30,6 +30,21 @@ struct ping_packet {
 	char msg[PACKET_SIZE-sizeof(struct icmphdr)]; 
 };
 
+struct stats {
+	int pkt_sent_cnt;
+	int pkt_recv_cnt;
+	float min_rtt;
+	float max_rtt;
+	float sum_rtt;
+};
+
+struct options {
+	int ttl;
+	int count;
+	int interval;
+	int timeout;
+};
+
 char* get_hostname_addr(char* address)
 {
 	struct hostent* h;
@@ -72,43 +87,40 @@ void interrupt_handler(int sig)
 	ping_loop = 0;
 }
 
-void show_stats(int pkt_sent_cnt, int pkt_recv_cnt, float min_rtt, float max_rtt, float sum_rtt)
+void show_stats(struct stats* statistics)
 {
-	float avg_rtt = sum_rtt/(float)pkt_recv_cnt;
-	if (pkt_recv_cnt == 0)
+	float avg_rtt = statistics->sum_rtt/(float)statistics->pkt_recv_cnt;
+	if (statistics->pkt_recv_cnt == 0)
 	{
-		min_rtt = 0;
-		max_rtt = 0;
-		sum_rtt = 0;
+		statistics->min_rtt = 0;
+		statistics->max_rtt = 0;
+		statistics->sum_rtt = 0;
 		avg_rtt = 0;
 	}
-	float pkt_loss = ((pkt_sent_cnt - pkt_recv_cnt)/(float)pkt_sent_cnt)*100.0;
+	float pkt_loss = ((statistics->pkt_sent_cnt - statistics->pkt_recv_cnt)/(float)statistics->pkt_sent_cnt)*100.0;
 	printf("\n%s", KGRN);
 	printf("+-----------------------------------------+\n");
 	printf("+----------------- STATS -----------------+\n");
 	printf("+-----------------------------------------+\n");
 	printf("%s", KNRM);
-	printf("%d packets transmitted, %d received, %.2f%% packet loss\n", pkt_sent_cnt, pkt_recv_cnt, pkt_loss);
-	printf("min rtt: %.2f ms, max rtt: %.2f ms, avg rtt: %.2f ms \n", min_rtt, max_rtt, avg_rtt);
+	printf("%d packets transmitted, %d received, %.2f%% packet loss\n", statistics->pkt_sent_cnt, statistics->pkt_recv_cnt, pkt_loss);
+	printf("min rtt: %.2f ms, max rtt: %.2f ms, avg rtt: %.2f ms \n", statistics->min_rtt, statistics->max_rtt, avg_rtt);
 }
 
 unsigned short checksum(unsigned short *buffer, int len) 
 {    
-	unsigned int sum=0; 
-	unsigned short result; 
-
-	for ( sum = 0; len > 1; len -= 2 )
+	unsigned long cksum = 0; 
+	for (cksum = 0; len > 1; len -= 2 )
 	{
-		sum += *buffer++; 
+		cksum += *buffer++;
 	}
-	if ( len == 1 ) 
+	if (len == 1) 
 	{
-		sum += *(unsigned char*)buffer; 
+		cksum += *(unsigned char*)buffer; 
 	}
-	sum = (sum >> 16) + (sum & 0xFFFF); 
-	sum += (sum >> 16); 
-	result = ~sum; 
-	return result; 
+	cksum = (cksum >> 16) + (cksum & 0xFFFF); 
+	cksum += (cksum >> 16);
+	return ~cksum; 
 }
 
 struct ping_packet* init_ping_pkt(struct ping_packet* packet, int seq_no) 
@@ -126,15 +138,13 @@ struct ping_packet* init_ping_pkt(struct ping_packet* packet, int seq_no)
 	return packet;
 }
 
-float ping(int sockfd, struct sockaddr_in* connection, char* destination, int* pkt_sent_cnt, int* pkt_recv_cnt)
+float ping(int sockfd, struct sockaddr_in* connection, char* destination, struct stats* statistics)
 {
 	struct timeval start, end;
 	struct iphdr* ip_reply;
 	struct ping_packet* packet; 
-	struct icmphdr* icmp;
-	struct sockaddr_in reply_addr; 
 	struct ping_packet* reply_packet;
-	char* out_pkt;
+	struct sockaddr_in reply_addr; 
 	char* in_pkt;
 	int addrlen;
 	float rtt;
@@ -142,12 +152,12 @@ float ping(int sockfd, struct sockaddr_in* connection, char* destination, int* p
 
 	packet = (struct ping_packet*)malloc(sizeof(struct ping_packet));
 	in_pkt = malloc(sizeof(struct iphdr) + sizeof(struct ping_packet));
-	init_ping_pkt(packet, (*pkt_sent_cnt));
+	init_ping_pkt(packet, statistics->pkt_sent_cnt);
 
 	gettimeofday(&start, NULL);
 	sendto(sockfd, packet, sizeof(struct ping_packet), 0, (struct sockaddr *)connection, sizeof(*connection));
 
-	(*pkt_sent_cnt)++;
+	statistics->pkt_sent_cnt++;
 
 	addrlen = sizeof(reply_addr);
 	if((recv_bytes = recvfrom(sockfd, in_pkt, sizeof(struct iphdr) + sizeof(struct ping_packet), 0, (struct sockaddr *)&reply_addr, &addrlen)) == -1) 
@@ -158,15 +168,15 @@ float ping(int sockfd, struct sockaddr_in* connection, char* destination, int* p
 		ip_reply = (struct iphdr*) in_pkt;
 		reply_packet = (struct ping_packet*)(in_pkt + sizeof(struct iphdr));
 		// printf("type: %d, code: %d\n", reply_packet->header.type, reply_packet->header.code);
-		if (reply_packet->header.type == 11) 
+		if (reply_packet->header.type == ICMP_TIME_EXCEEDED) 
 		{
-			printf("Time to live exceeded\n");
-		} else if (reply_packet->header.type == 0) 
+			printf("%d bytes from (%s%s%s) time: %sTime to live exceeded%s\n", recv_bytes, KYEL, destination, KNRM, KRED, KNRM);
+		} else if (reply_packet->header.type == ICMP_ECHOREPLY) 
 		{
 			gettimeofday(&end, NULL);
 			rtt = 1000*(end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1000.0;
-			(*pkt_recv_cnt)++;
-			printf("%d bytes from (%s%s%s) time: %s%f%s ms\n", recv_bytes, KYEL, destination, KNRM, KGRN, rtt, KNRM);
+			statistics->pkt_recv_cnt++;
+			printf("%d bytes from (%s%s%s) time: %s%.2f%s ms\n", recv_bytes, KYEL, destination, KNRM, KGRN, rtt, KNRM);
 		}
 	}
 
@@ -175,13 +185,9 @@ float ping(int sockfd, struct sockaddr_in* connection, char* destination, int* p
 	return rtt;
 }
 
-void send_ping_requests(char* destination, int ttl, int count, int interval, int ts)
+void send_ping_requests(char* destination, struct options* opts)
 {
-	int pkt_recv_cnt = 0;
-	int pkt_sent_cnt = 0;
-	float max_rtt = -1;
-	float min_rtt = 10000;
-	float sum_rtt = 0.0;
+	struct stats statistics = {0, 0, 10, -1, 0};
 	struct sockaddr_in connection;
 
 	if (is_valid_ip(destination) != 1) 
@@ -192,60 +198,58 @@ void send_ping_requests(char* destination, int ttl, int count, int interval, int
 	connection.sin_family = AF_INET;
 	connection.sin_addr.s_addr = inet_addr(destination);
 
-	int sockfd = create_socket(ttl, ts);
+	int sockfd = create_socket(opts->ttl, opts->timeout);
 
 	printf("%s", KYEL);
 	printf("PING (%s)\n", destination);
 	printf("%s", KNRM);
 	while (ping_loop) {
-		if (count > 0)
+		if (opts->count > 0)
 		{
-			count--;
-		} else if (count == 0) 
+			opts->count--;
+		} else if (opts->count == 0) 
 		{
 			ping_loop = 0;
 			break;
 		}
 
-		float rtt = ping(sockfd, &connection, destination, &pkt_sent_cnt, &pkt_recv_cnt);
-		sum_rtt += rtt;
-		if (rtt > max_rtt)
-			max_rtt = rtt;
-		if (rtt < min_rtt)
-			min_rtt = rtt;
-		usleep(interval);
+		float rtt = ping(sockfd, &connection, destination, &statistics);
+		statistics.sum_rtt += rtt;
+		if (rtt > statistics.max_rtt)
+			statistics.max_rtt = rtt;
+		if (rtt < statistics.min_rtt)
+			statistics.min_rtt = rtt;
+		usleep(opts->interval);
 	}
 	close(sockfd);
-	show_stats(pkt_sent_cnt, pkt_recv_cnt, min_rtt, max_rtt, sum_rtt);
+	show_stats(&statistics);
 }
 
 
 int main(int argc, char** argv) { 
-	if (argc % 2 == 1) {
+	int opt;
+	struct options opts = {64, -1, INTERVAL, TIMEOUT};
+
+	if (argc % 2 == 1 || argc < 2) {
 		show_usage();
 		return 0;
 	}
 
-	int opt;
-	int ttl = 64;
-	int count = -1;
-	int interval = INTERVAL;
-	int ts = TIMEOUT;
 	while((opt = getopt(argc, argv, "t:c:i:w:")) != -1)  
 	{  
 		switch(opt)  
 		{  
 			case 't': 
-				ttl = atoi(optarg);
+				opts.ttl = atoi(optarg);
 				break;  
 			case 'c':
-				count = atoi(optarg);
+				opts.count = atoi(optarg);
 				break;
 			case 'i':
-				interval = atoi(optarg) * 1000000;
+				opts.interval = atoi(optarg) * 1000000;
 				break;
 			case 'w':
-				ts = atoi(optarg);
+				opts.timeout = atoi(optarg);
 				break;  
 			case ':':  
 				printf("option needs a value\n");  
@@ -272,7 +276,7 @@ int main(int argc, char** argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	send_ping_requests(argv[argc -1], ttl, count, interval, ts);
+	send_ping_requests(argv[argc -1], &opts);
 
 	return 0;
 }
